@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>🤖 WebRTC反诈AI双工对话客户端</title>
+    <title>🤖 反诈AI双工对话客户端</title>
     <style>
       * {
         margin: 0;
@@ -332,14 +332,14 @@
     <div class="container">
       <div class="header">
         <h1>🤖 反诈AI双工对话系统</h1>
-        <p>基于WebRTC的实时语音交互平台</p>
+        <p>基于WebSocket的实时语音交互平台</p>
       </div>
 
       <div class="status-card">
         <div class="connection-info">
           <div>
-            <strong>WebRTC服务:</strong>
-            <span id="webrtcAddress">http://81.71.152.21:8080</span>
+            <strong>WebSocket服务:</strong>
+            <span id="websocketAddress">ws://81.71.152.21:31004</span>
           </div>
           <div>
             <strong>WebSocket:</strong>
@@ -355,7 +355,7 @@
 
         <div class="status-grid">
           <div class="status-item">
-            <div class="status-label">WebRTC状态</div>
+            <div class="status-label">连接状态</div>
             <div class="status-value" id="webrtcStatus">未连接</div>
           </div>
           <div class="status-item">
@@ -374,7 +374,7 @@
       </div>
 
       <div class="controls">
-        <button class="btn btn-primary" id="connectBtn">🔗 连接服务器</button>
+        <button class="btn btn-primary" id="connectBtn">🔗 开始对话</button>
         <button class="btn btn-secondary" id="disconnectBtn" disabled>
           🔌 断开连接
         </button>
@@ -383,9 +383,7 @@
       <div class="audio-visualizer">
         <h3>🎵 音频可视化</h3>
         <canvas id="audioCanvas"></canvas>
-        <div class="audio-level">
-          音频电平: <span id="audioLevel">0%</span>
-        </div>
+        <div class="audio-level">音频电平: <span id="audioLevel">0%</span></div>
       </div>
 
       <div class="log-container">
@@ -402,12 +400,18 @@
       let websocket = null;
       let audioContext = null;
       let analyser = null;
+
+      // WebSocket重连相关变量
+      let websocketReconnecting = false;
+      let reconnectAttempts = 0;
+      let maxReconnectAttempts = 5;
+      let reconnectDelay = 1000; // 初始重连延迟1秒
       let dataArray = null;
       let animationId = null;
 
       // 服务器配置
-      const SERVER_URL = "http://81.71.152.21:8080";
-      const WS_URL = "ws://81.71.152.21:31004";
+      const SERVER_URL = "https://haosinuo.asia";
+      const WS_URL = "wss://haosinuo.asia/ws";
 
       // DOM元素
       const elements = {
@@ -432,9 +436,1551 @@
         errors: 0,
       };
 
+      // 连接状态枚举
+      const ConnectionState = {
+        DISCONNECTED: "disconnected",
+        CONNECTING_WEBRTC: "connecting_webrtc",
+        WEBRTC_CONNECTED: "webrtc_connected",
+        WEBRTC_FAILED: "webrtc_failed",
+        CONNECTING_WEBSOCKET: "connecting_websocket",
+        WEBSOCKET_CONNECTED: "websocket_connected",
+        WEBSOCKET_FAILED: "websocket_failed",
+      };
+
+      // 连接管理器类
+      class ConnectionManager {
+        constructor() {
+          this.mode = null; // 'webrtc' | 'websocket'
+          this.state = ConnectionState.DISCONNECTED;
+          this.webrtcConnection = null;
+          this.websocketConnection = null;
+          this.audioSender = null;
+          this.audioReceiver = null;
+          this.connectionTimeout = null;
+          this.forceWebSocketMode = false; // 强制WebSocket模式标志
+        }
+
+        async connect() {
+          try {
+            log("🚀 开始连接WebSocket音频服务...");
+            elements.connectBtn.disabled = true;
+            elements.systemStatus.textContent = "连接中...";
+
+            // 检查浏览器兼容性
+            if (
+              !navigator.mediaDevices ||
+              !navigator.mediaDevices.getUserMedia
+            ) {
+              throw new Error("浏览器不支持音频录制");
+            }
+
+            // 初始化WebSocket连接
+            await this.initWebSocket();
+
+            // 获取用户媒体
+            await this.initUserMedia();
+
+            // 直接使用WebSocket音频模式
+            log("🎯 启动WebSocket音频模式", "success");
+            await this.switchToWebSocketMode();
+          } catch (error) {
+            log(`连接失败: ${error.message}`, "error");
+            this.handleConnectionError(error);
+          }
+        }
+
+        async tryWebRTCConnection() {
+          return new Promise(async (resolve) => {
+            const startTime = Date.now();
+
+            try {
+              this.state = ConnectionState.CONNECTING_WEBRTC;
+              log("🔗 尝试建立WebRTC连接...");
+
+              // 设置连接超时（5秒）
+              this.connectionTimeout = setTimeout(() => {
+                const duration = Date.now() - startTime;
+                FallbackLogger.logConnectionAttempt(
+                  "webrtc",
+                  "timeout",
+                  duration
+                );
+                FallbackLogger.logFallbackTrigger(
+                  "连接超时",
+                  "webrtc",
+                  "websocket"
+                );
+                log("WebRTC连接超时，准备降级", "warning");
+                resolve(false);
+              }, 5000);
+
+              // 创建PeerConnection（复用现有逻辑）
+              pc = new RTCPeerConnection({
+                iceServers: [
+                  { urls: "stun:stun.l.google.com:19302" },
+                  { urls: "stun:stun1.l.google.com:19302" },
+                ],
+              });
+
+              // 添加本地流
+              localStream.getTracks().forEach((track) => {
+                pc.addTrack(track, localStream);
+              });
+
+              // 处理远程流
+              pc.ontrack = (event) => {
+                log("🔊 收到远程音频流");
+                remoteStream = event.streams[0];
+                const audio = new Audio();
+                audio.srcObject = remoteStream;
+                audio.autoplay = true;
+                log("✅ 远程音频开始播放");
+              };
+
+              // ICE连接状态变化
+              pc.oniceconnectionstatechange = () => {
+                const currentState = pc.iceConnectionState;
+                elements.webrtcStatus.textContent = currentState;
+                log(`🔗 WebRTC状态变化: ${currentState}`);
+
+                if (currentState === "connected") {
+                  clearTimeout(this.connectionTimeout);
+                  const duration = Date.now() - startTime;
+
+                  this.state = ConnectionState.WEBRTC_CONNECTED;
+                  this.mode = "webrtc";
+                  elements.webrtcStatus.className = "status-value success";
+                  elements.systemStatus.textContent = "WebRTC已连接";
+                  elements.disconnectBtn.disabled = false;
+
+                  FallbackLogger.logConnectionAttempt(
+                    "webrtc",
+                    "success",
+                    duration
+                  );
+                  log("🎉 WebRTC连接建立成功！", "success");
+                  stats.startTime = Date.now();
+                  resolve(true);
+                } else if (
+                  currentState === "failed" ||
+                  currentState === "disconnected"
+                ) {
+                  clearTimeout(this.connectionTimeout);
+                  const duration = Date.now() - startTime;
+
+                  this.state = ConnectionState.WEBRTC_FAILED;
+                  elements.webrtcStatus.className = "status-value error";
+
+                  const reason =
+                    currentState === "failed" ? "ICE连接失败" : "连接断开";
+                  FallbackLogger.logConnectionAttempt(
+                    "webrtc",
+                    "failure",
+                    duration,
+                    reason
+                  );
+                  FallbackLogger.logFallbackTrigger(
+                    reason,
+                    "webrtc",
+                    "websocket"
+                  );
+
+                  log(`❌ WebRTC${reason}，准备降级`, "error");
+                  stats.errors++;
+                  resolve(false);
+                }
+              };
+
+              // 创建offer并发送到服务器
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+
+              const response = await fetch(`${SERVER_URL}/offer`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  sdp: offer.sdp,
+                  type: offer.type,
+                }),
+              });
+
+              if (!response.ok) {
+                throw new Error(
+                  `HTTP ${response.status}: ${response.statusText}`
+                );
+              }
+
+              const answer = await response.json();
+              await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            } catch (error) {
+              clearTimeout(this.connectionTimeout);
+              const duration = Date.now() - startTime;
+
+              FallbackLogger.logConnectionAttempt(
+                "webrtc",
+                "failure",
+                duration,
+                error.message
+              );
+              FallbackLogger.logFallbackTrigger(
+                "连接异常",
+                "webrtc",
+                "websocket"
+              );
+
+              log(`WebRTC连接异常: ${error.message}`, "error");
+              resolve(false);
+            }
+          });
+        }
+
+        async switchToWebSocketMode() {
+          try {
+            this.state = ConnectionState.CONNECTING_WEBSOCKET;
+            this.mode = "websocket";
+
+            log("🔄 切换到WebSocket音频模式（PCM上行 + MP3下行）");
+
+            // 初始化音频发送器和接收器
+            this.audioSender = new AudioSender("websocket", websocket);
+            this.audioReceiver = new AudioReceiver("websocket", websocket);
+
+            // 开始音频录制和发送
+            await this.audioSender.startRecording(localStream);
+
+            this.state = ConnectionState.WEBSOCKET_CONNECTED;
+            elements.webrtcStatus.textContent = "WebSocket音频";
+            elements.webrtcStatus.className = "status-value success"; // 改为成功状态
+            elements.systemStatus.textContent = "WebSocket已连接（优化模式）";
+            elements.aiStatus.textContent = "在线";
+            elements.aiStatus.className = "status-value success";
+            elements.disconnectBtn.disabled = false;
+
+            // 详细的音频处理路径日志
+            log("✅ WebSocket音频模式启动成功", "success");
+            log(
+              "🎤 音频上行: PCM 16kHz → WebSocket → 后端AudioProcessor",
+              "info"
+            );
+            log(
+              "🔊 音频下行: TTS MP3 → Base64 → WebSocket → 前端Audio播放",
+              "info"
+            );
+            log("🛡️ 打断机制: VAD检测 → 队列清空 → 音频停止", "info");
+            stats.startTime = Date.now();
+          } catch (error) {
+            this.state = ConnectionState.WEBSOCKET_FAILED;
+            log(`WebSocket音频模式启动失败: ${error.message}`, "error");
+            throw error;
+          }
+        }
+
+        async initWebSocket() {
+          // 复用现有的WebSocket初始化逻辑
+          return initWebSocket();
+        }
+
+        async initUserMedia() {
+          // 复用现有的用户媒体获取逻辑
+          log("请求麦克风权限...");
+          localStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              sampleRate: 16000,
+            },
+            video: false,
+          });
+
+          log("✅ 麦克风权限获取成功");
+          elements.audioStatus.textContent = "已激活";
+          elements.audioStatus.className = "status-value success";
+
+          // 初始化音频可视化（复用现有逻辑）
+          initAudioVisualization();
+        }
+
+        handleConnectionError(error) {
+          elements.connectBtn.disabled = false;
+          elements.systemStatus.textContent = "连接失败";
+          stats.errors++;
+
+          // 显示错误建议
+          const suggestion = ErrorRecovery.getErrorSuggestion(error);
+          log(`连接失败建议: ${suggestion}`, "info");
+
+          // 更新UI状态
+          elements.webrtcStatus.textContent = "连接失败";
+          elements.webrtcStatus.className = "status-value error";
+        }
+
+        async disconnect() {
+          try {
+            log("正在断开连接...");
+
+            // 清理连接超时
+            if (this.connectionTimeout) {
+              clearTimeout(this.connectionTimeout);
+              this.connectionTimeout = null;
+            }
+
+            // 停止音频发送器
+            if (this.audioSender) {
+              this.audioSender.stop();
+              this.audioSender = null;
+            }
+
+            // 停止音频接收器
+            if (this.audioReceiver) {
+              this.audioReceiver.stop();
+              this.audioReceiver = null;
+            }
+
+            // 复用现有的断开连接逻辑
+            await disconnectFromServer();
+
+            this.state = ConnectionState.DISCONNECTED;
+            this.mode = null;
+            this.forceWebSocketMode = false;
+          } catch (error) {
+            log(`断开连接时出错: ${error.message}`, "error");
+          }
+        }
+      }
+
+      // 音频发送器类
+      class AudioSender {
+        constructor(mode, connection) {
+          this.mode = mode;
+          this.connection = connection;
+          this.mediaRecorder = null;
+          this.isRecording = false;
+          this.audioChunks = [];
+          this.sequenceNumber = 0;
+
+          // PCM录制相关属性
+          this.audioContext = null;
+          this.sourceNode = null;
+          this.processorNode = null;
+          this.isPCMRecording = false;
+        }
+
+        async initPCMRecorder(stream) {
+          try {
+            // 检查AudioContext支持
+            if (!window.AudioContext && !window.webkitAudioContext) {
+              throw new Error("浏览器不支持AudioContext，降级到MediaRecorder");
+            }
+
+            // 创建AudioContext（16kHz采样率，与WebRTC一致）
+            const AudioContextClass =
+              window.AudioContext || window.webkitAudioContext;
+            this.audioContext = new AudioContextClass({ sampleRate: 16000 });
+
+            // 创建音频源节点
+            this.sourceNode = this.audioContext.createMediaStreamSource(stream);
+
+            // 创建ScriptProcessor节点（1024样本缓冲区）
+            this.processorNode = this.audioContext.createScriptProcessor(
+              1024,
+              1,
+              1
+            );
+
+            // 设置音频处理回调
+            this.processorNode.onaudioprocess = (event) => {
+              if (this.isPCMRecording) {
+                const inputBuffer = event.inputBuffer;
+                const pcmData = inputBuffer.getChannelData(0); // Float32Array
+                this.sendPCMChunk(pcmData);
+              }
+            };
+
+            // 连接音频节点
+            this.sourceNode.connect(this.processorNode);
+            this.processorNode.connect(this.audioContext.destination);
+
+            // 开始PCM录制
+            this.isPCMRecording = true;
+            log("✅ PCM录制器启动成功 (16kHz单声道)", "success");
+          } catch (error) {
+            log(`PCM录制器初始化失败: ${error.message}`, "error");
+            // 降级到MediaRecorder
+            await this.fallbackToMediaRecorder(stream);
+          }
+        }
+
+        sendPCMChunk(pcmData) {
+          try {
+            // 简单的音频活动检测（前端预打断）
+            const rms = Math.sqrt(
+              pcmData.reduce((sum, sample) => sum + sample * sample, 0) /
+                pcmData.length
+            );
+            const isActive = rms > 0.01; // 简单的阈值检测
+
+            // 如果检测到音频活动且有音频正在播放，立即触发前端打断
+            if (
+              isActive &&
+              connectionManager.audioReceiver &&
+              connectionManager.audioReceiver.isPlaying
+            ) {
+              connectionManager.audioReceiver.clearQueue();
+              // 注意：后端的VAD会进行更精确的打断检测
+            }
+
+            // 转换Float32到Int16（与WebRTC音频格式一致）
+            const int16Data = new Int16Array(pcmData.length);
+            for (let i = 0; i < pcmData.length; i++) {
+              // 限制范围并转换为16位整数
+              const sample = Math.max(-1, Math.min(1, pcmData[i]));
+              int16Data[i] = Math.round(sample * 32767);
+            }
+
+            // 构造PCM音频消息
+            const message = {
+              type: "audio_chunk",
+              data: {
+                data: Array.from(int16Data), // 发送Int16数组
+                format: "pcm_int16",
+                sample_rate: 16000,
+                channels: 1,
+                sequence: this.sequenceNumber++,
+                timestamp: Date.now(),
+                client_id: "web_client_" + Date.now(),
+              },
+            };
+
+            // 发送PCM数据
+            if (
+              this.connection &&
+              this.connection.readyState === WebSocket.OPEN
+            ) {
+              this.connection.send(JSON.stringify(message));
+
+              // 更新统计
+              stats.audioChunksSent++;
+              if (stats.audioChunksSent % 50 === 0) {
+                log(`📤 已发送${stats.audioChunksSent}个PCM音频块`, "info");
+              }
+            }
+          } catch (error) {
+            log(`PCM数据发送失败: ${error.message}`, "error");
+            stats.errors++;
+          }
+        }
+
+        async fallbackToMediaRecorder(stream) {
+          log("🔄 降级到MediaRecorder模式", "warning");
+
+          // 原有的MediaRecorder逻辑
+          const options = {
+            mimeType: "audio/webm;codecs=opus",
+            audioBitsPerSecond: 16000,
+          };
+
+          if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+            log("浏览器不支持WebM Opus格式，尝试其他格式", "warning");
+            const fallbackOptions = [
+              { mimeType: "audio/webm" },
+              { mimeType: "audio/ogg;codecs=opus" },
+              { mimeType: "audio/mp4" },
+            ];
+
+            let selectedOptions = null;
+            for (const option of fallbackOptions) {
+              if (MediaRecorder.isTypeSupported(option.mimeType)) {
+                selectedOptions = option;
+                log(`使用回退格式: ${option.mimeType}`, "info");
+                break;
+              }
+            }
+
+            this.mediaRecorder = selectedOptions
+              ? new MediaRecorder(stream, selectedOptions)
+              : new MediaRecorder(stream);
+          } else {
+            this.mediaRecorder = new MediaRecorder(stream, options);
+          }
+
+          this.mediaRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              this.sendAudioChunk(event.data);
+            }
+          };
+
+          this.mediaRecorder.onerror = (event) => {
+            log(`音频录制错误: ${event.error}`, "error");
+            stats.errors++;
+          };
+
+          this.mediaRecorder.start(100);
+        }
+
+        async startRecording(stream) {
+          try {
+            if (this.mode === "websocket") {
+              // 使用PCM录制（与WebRTC相同的音频格式）
+              await this.initPCMRecorder(stream);
+              log("🎤 PCM录制器初始化成功", "success");
+              this.isRecording = true;
+
+              log("🎤 WebSocket音频录制已启动");
+            }
+          } catch (error) {
+            log(`启动音频录制失败: ${error.message}`, "error");
+            stats.errors++;
+            throw error;
+          }
+        }
+
+        async sendAudioChunk(audioBlob) {
+          try {
+            if (
+              this.mode === "websocket" &&
+              this.connection &&
+              this.connection.readyState === WebSocket.OPEN
+            ) {
+              // 转换为Base64
+              const arrayBuffer = await audioBlob.arrayBuffer();
+              const base64Data = btoa(
+                String.fromCharCode(...new Uint8Array(arrayBuffer))
+              );
+
+              const message = {
+                type: "audio_chunk",
+                data: base64Data,
+                timestamp: Date.now(),
+                sequence: this.sequenceNumber++,
+                client_id: "web_client_" + Date.now(),
+                format: "webm/opus", // 明确标识音频格式
+                sample_rate: 16000, // 明确标识采样率
+              };
+
+              this.connection.send(JSON.stringify(message));
+              stats.messagesSent++;
+
+              // 记录音频传输日志（每10次记录一次，避免日志过多）
+              if (this.sequenceNumber % 10 === 0) {
+                FallbackLogger.logAudioTransmission(
+                  "websocket",
+                  "outbound",
+                  arrayBuffer.byteLength
+                );
+              }
+            } else if (
+              this.connection &&
+              this.connection.readyState !== WebSocket.OPEN
+            ) {
+              log(
+                `WebSocket连接状态异常: ${this.connection.readyState}`,
+                "warning"
+              );
+            }
+          } catch (error) {
+            log(`发送音频数据失败: ${error.message}`, "error");
+            stats.errors++;
+          }
+        }
+
+        stop() {
+          // 停止PCM录制
+          if (this.isPCMRecording) {
+            this.isPCMRecording = false;
+
+            // 断开音频节点连接
+            if (this.sourceNode && this.processorNode) {
+              this.sourceNode.disconnect();
+              this.processorNode.disconnect();
+            }
+
+            // 关闭AudioContext
+            if (this.audioContext && this.audioContext.state !== "closed") {
+              this.audioContext.close();
+            }
+
+            log("🛑 PCM录制已停止");
+          }
+
+          // 停止MediaRecorder（降级模式）
+          if (this.mediaRecorder && this.isRecording) {
+            this.mediaRecorder.stop();
+            log("🛑 MediaRecorder录制已停止");
+          }
+
+          this.isRecording = false;
+        }
+      }
+
+      // 音频接收器类
+      class AudioReceiver {
+        constructor(mode, connection) {
+          this.mode = mode;
+          this.connection = connection;
+          this.audioQueue = [];
+          this.isPlaying = false;
+          this.currentAudio = null;
+          this.playbackSequence = 0;
+          this.retryCount = 0;
+          this.maxRetries = 3;
+        }
+
+        handleIncomingAudio(audioData, metadata = {}) {
+          try {
+            if (this.mode === "websocket") {
+              // 检查是否有音频数据
+              if (!metadata.has_audio || !audioData) {
+                // 没有音频数据，只显示文本回复
+                if (metadata.text) {
+                  log(`🔊 AI文本回复: ${metadata.text}`, "success");
+                }
+                return;
+              }
+
+              // 检测音频格式
+              const audioFormat = metadata.audio_format || "webm";
+
+              if (audioFormat === "mp3") {
+                // 处理MP3音频（新格式）
+                this.handleMP3Audio(audioData, metadata);
+              } else {
+                // 处理WebM音频（旧格式，保持兼容性）
+                this.handleWebMAudio(audioData, metadata);
+              }
+            }
+          } catch (error) {
+            log(`音频处理异常: ${error.message}`, "error");
+          }
+        }
+
+        handleMP3Audio(audioData, metadata) {
+          try {
+            // 验证Base64数据
+            if (!audioData || typeof audioData !== "string") {
+              throw new Error("无效的MP3音频数据");
+            }
+
+            // 解码Base64 MP3数据
+            const binaryString = atob(audioData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            // 验证MP3文件头（简单检查）
+            if (
+              bytes.length < 3 ||
+              !(bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)
+            ) {
+              log("⚠️ MP3文件头验证失败，但仍尝试播放", "warning");
+            }
+
+            // 创建MP3 Blob
+            const audioBlob = new Blob([bytes], { type: "audio/mpeg" });
+
+            // 加入播放队列
+            this.audioQueue.push({
+              blob: audioBlob,
+              text: metadata.text,
+              timestamp: metadata.timestamp,
+              format: "mp3",
+              size: bytes.length,
+            });
+
+            log(
+              `📥 收到MP3音频回复: "${metadata.text}" (${bytes.length}字节)`,
+              "success"
+            );
+
+            // 如果没有正在播放，立即播放
+            if (!this.isPlaying) {
+              this.playNextAudio();
+            }
+          } catch (error) {
+            log(`MP3音频处理失败: ${error.message}`, "error");
+            stats.errors++;
+
+            // 降级显示文本
+            if (metadata.text) {
+              log(`🔊 AI文本回复: ${metadata.text}`, "success");
+            }
+          }
+        }
+
+        handleWebMAudio(audioData, metadata) {
+          try {
+            // 解码Base64 WebM数据（保持向后兼容）
+            const binaryString = atob(audioData);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+
+            // 创建音频对象
+            const audioItem = {
+              data: bytes,
+              metadata: metadata,
+              timestamp: Date.now(),
+              sequence: this.playbackSequence++,
+            };
+
+            // 添加到播放队列
+            this.audioQueue.push(audioItem);
+
+            // 记录音频传输日志（每10次记录一次，避免日志过多）
+            if (this.playbackSequence % 10 === 0) {
+              FallbackLogger.logAudioTransmission(
+                "websocket",
+                "inbound",
+                bytes.length
+              );
+            }
+
+            // 如果当前没有播放，开始播放
+            if (!this.isPlaying) {
+              this.playNextAudio();
+            }
+
+            // 只在每10次音频回复时记录日志，避免日志过多
+            if (this.playbackSequence % 10 === 0) {
+              log("🔊 收到WebSocket音频回复，已加入播放队列");
+            }
+          } catch (error) {
+            log(`处理音频数据失败: ${error.message}`, "error");
+            stats.errors++;
+
+            // 如果是Base64解码错误，但有文本回复，仍然显示文本
+            if (error.message.includes("atob") && metadata.text) {
+              log(`🔊 AI文本回复: ${metadata.text}`, "success");
+            }
+          }
+        }
+
+        async playNextAudio() {
+          if (this.audioQueue.length === 0) {
+            this.isPlaying = false;
+            return;
+          }
+
+          this.isPlaying = true;
+          const audioItem = this.audioQueue.shift();
+
+          try {
+            let audioBlob;
+            let mimeType;
+            let formatName;
+
+            // 根据音频格式创建正确的Blob
+            if (audioItem.format === "mp3") {
+              // MP3格式（新的优化格式）
+              audioBlob = audioItem.blob;
+              mimeType = "audio/mpeg";
+              formatName = "MP3";
+            } else {
+              // WebM格式（向后兼容）
+              audioBlob = new Blob([audioItem.data], { type: "audio/webm" });
+              mimeType = "audio/webm";
+              formatName = "WebM";
+            }
+
+            const audioUrl = URL.createObjectURL(audioBlob);
+            this.currentAudio = new Audio(audioUrl);
+
+            // 设置音频事件处理
+            this.currentAudio.onended = () => {
+              URL.revokeObjectURL(audioUrl);
+              this.currentAudio = null;
+              this.retryCount = 0; // 重置重试计数器
+              log(`✅ ${formatName}音频播放完成`);
+              // 播放下一个音频
+              this.playNextAudio();
+            };
+
+            this.currentAudio.onerror = (error) => {
+              // 使用错误监控系统
+              errorMonitor.logError("audio", error, {
+                format: formatName,
+                audioSize: audioBlob.size,
+                retryCount: this.retryCount,
+                queueLength: this.audioQueue.length,
+              });
+
+              URL.revokeObjectURL(audioUrl);
+              this.currentAudio = null;
+              stats.errors++;
+
+              // 重试机制
+              if (this.retryCount < this.maxRetries) {
+                this.retryCount++;
+                log(
+                  `🔄 音频播放重试 (${this.retryCount}/${this.maxRetries})`,
+                  "warning"
+                );
+
+                // 将当前项目重新加入队列头部
+                this.audioQueue.unshift(audioItem);
+                setTimeout(() => this.playNextAudio(), 500 * this.retryCount);
+              } else {
+                errorMonitor.logError("audio", new Error("音频播放重试失败"), {
+                  format: formatName,
+                  maxRetries: this.maxRetries,
+                  finalFailure: true,
+                });
+                this.retryCount = 0;
+                // 尝试播放下一个音频
+                setTimeout(() => this.playNextAudio(), 100);
+              }
+            };
+
+            this.currentAudio.onloadstart = () => {
+              log(
+                `🎵 开始播放${formatName}音频: "${audioItem.text || "无文本"}"`,
+                "info"
+              );
+            };
+
+            this.currentAudio.oncanplay = () => {
+              log(`📻 ${formatName}音频已准备就绪`);
+            };
+
+            // 开始播放
+            await this.currentAudio.play();
+          } catch (error) {
+            log(`音频播放失败: ${error.message}`, "error");
+            stats.errors++;
+
+            // 尝试播放下一个音频
+            setTimeout(() => this.playNextAudio(), 100);
+          }
+        }
+
+        // 清空播放队列（用于打断）
+        clearQueue() {
+          const queueLength = this.audioQueue.length;
+          const wasPlaying = this.isPlaying;
+
+          // 停止当前播放
+          if (this.currentAudio) {
+            this.currentAudio.pause();
+            this.currentAudio.currentTime = 0;
+            this.currentAudio = null;
+          }
+
+          // 清空队列
+          this.audioQueue = [];
+          this.isPlaying = false;
+
+          if (queueLength > 0 || wasPlaying) {
+            log(
+              `🛑 音频播放已打断，清空队列 (${queueLength}个待播放项目)`,
+              "info"
+            );
+          }
+        }
+
+        // 暂停当前播放
+        pause() {
+          if (this.currentAudio) {
+            this.currentAudio.pause();
+          }
+          this.isPlaying = false;
+        }
+
+        // 恢复播放
+        resume() {
+          if (this.currentAudio && this.currentAudio.paused) {
+            this.currentAudio.play().catch((error) => {
+              log(`恢复播放失败: ${error.message}`, "error");
+            });
+            this.isPlaying = true;
+          }
+        }
+
+        // 处理音频控制指令
+        handleAudioControl(message) {
+          try {
+            const action = message.action;
+
+            switch (action) {
+              case "stop":
+                // 收到停止指令，立即清空队列和停止播放
+                this.clearQueue();
+                log("🛑 收到后端停止指令，音频播放已中断", "info");
+                break;
+              case "pause":
+                // 暂停当前播放
+                this.pause();
+                log("⏸️ 收到暂停指令", "info");
+                break;
+              case "resume":
+                // 恢复播放
+                this.resume();
+                log("▶️ 收到恢复播放指令", "info");
+                break;
+              default:
+                log(`⚠️ 未知的音频控制指令: ${action}`, "warning");
+            }
+          } catch (error) {
+            log(`音频控制处理失败: ${error.message}`, "error");
+          }
+        }
+
+        stop() {
+          this.clearQueue();
+          this.playbackSequence = 0;
+        }
+      }
+
+      // 降级日志记录器
+      class FallbackLogger {
+        static logConnectionAttempt(type, result, duration, error = null) {
+          const logEntry = {
+            timestamp: Date.now(),
+            type: type, // 'webrtc' | 'websocket'
+            result: result, // 'success' | 'failure' | 'timeout'
+            duration: duration,
+            userAgent: navigator.userAgent,
+            network: navigator.connection?.effectiveType || "unknown",
+            error: error,
+          };
+
+          // 记录到控制台和UI
+          const message = `连接尝试: ${type} - ${result} (${duration}ms)`;
+          const logType = result === "success" ? "success" : "warning";
+          log(message, logType);
+
+          // 记录详细信息到控制台
+          console.log("连接详情:", logEntry);
+
+          return logEntry;
+        }
+
+        static logAudioTransmission(mode, direction, size) {
+          const message = `音频传输: ${mode} - ${direction} - ${size}字节`;
+          log(message);
+        }
+
+        static logFallbackTrigger(reason, fromMode, toMode) {
+          const message = `降级触发: ${reason} (${fromMode} → ${toMode})`;
+          log(message, "warning");
+
+          // 记录详细的降级信息
+          const fallbackInfo = {
+            timestamp: Date.now(),
+            reason: reason,
+            fromMode: fromMode,
+            toMode: toMode,
+            userAgent: navigator.userAgent,
+            network: navigator.connection?.effectiveType || "unknown",
+          };
+
+          console.log("降级详情:", fallbackInfo);
+        }
+      }
+
+      // 错误恢复机制
+      class ErrorRecovery {
+        static async handleWebRTCFailure(reason = "未知原因") {
+          log(`WebRTC连接失败: ${reason}，切换到WebSocket模式`, "warning");
+          FallbackLogger.logFallbackTrigger(reason, "webrtc", "websocket");
+
+          try {
+            await connectionManager.switchToWebSocketMode();
+            return true;
+          } catch (error) {
+            log(`WebSocket模式启动失败: ${error.message}`, "error");
+            return false;
+          }
+        }
+
+        static async handleAudioError(error, component = "音频组件") {
+          log(`${component}错误: ${error.message}，尝试重新初始化`, "warning");
+          stats.errors++;
+
+          try {
+            // 重新初始化音频组件
+            if (connectionManager.audioSender) {
+              connectionManager.audioSender.stop();
+              connectionManager.audioSender = null;
+            }
+
+            if (connectionManager.audioReceiver) {
+              connectionManager.audioReceiver.stop();
+              connectionManager.audioReceiver = null;
+            }
+
+            // 如果是WebSocket模式，重新创建音频处理器
+            if (connectionManager.mode === "websocket") {
+              connectionManager.audioSender = new AudioSender(
+                "websocket",
+                websocket
+              );
+              connectionManager.audioReceiver = new AudioReceiver(
+                "websocket",
+                websocket
+              );
+
+              if (localStream) {
+                await connectionManager.audioSender.startRecording(localStream);
+              }
+            }
+
+            log(`${component}重新初始化成功`, "success");
+            return true;
+          } catch (recoveryError) {
+            log(`${component}恢复失败: ${recoveryError.message}`, "error");
+            return false;
+          }
+        }
+
+        static async handleWebSocketError(error) {
+          log(`WebSocket错误: ${error.message}`, "error");
+          stats.errors++;
+
+          // 如果WebSocket连接失败，尝试重新连接
+          if (websocket && websocket.readyState !== WebSocket.OPEN) {
+            log("尝试重新建立WebSocket连接", "info");
+
+            try {
+              await connectionManager.initWebSocket();
+
+              // 如果是WebSocket音频模式，重新初始化音频处理
+              if (connectionManager.mode === "websocket") {
+                await connectionManager.switchToWebSocketMode();
+              }
+
+              return true;
+            } catch (reconnectError) {
+              log(`WebSocket重连失败: ${reconnectError.message}`, "error");
+              return false;
+            }
+          }
+
+          return false;
+        }
+
+        static async handleConnectionTimeout(connectionType = "连接") {
+          log(`${connectionType}超时，尝试恢复`, "warning");
+
+          // 清理当前连接状态
+          if (connectionManager.connectionTimeout) {
+            clearTimeout(connectionManager.connectionTimeout);
+            connectionManager.connectionTimeout = null;
+          }
+
+          // 根据连接类型采取不同的恢复策略
+          if (connectionType === "WebRTC") {
+            return await this.handleWebRTCFailure("连接超时");
+          } else {
+            return await this.handleWebSocketError(new Error("连接超时"));
+          }
+        }
+
+        static async handleMediaError(error) {
+          log(`媒体设备错误: ${error.message}`, "error");
+          stats.errors++;
+
+          try {
+            // 尝试重新获取媒体权限
+            if (localStream) {
+              localStream.getTracks().forEach((track) => track.stop());
+              localStream = null;
+            }
+
+            // 重新请求媒体权限
+            await connectionManager.initUserMedia();
+
+            // 如果是WebSocket模式，重新启动录制
+            if (
+              connectionManager.mode === "websocket" &&
+              connectionManager.audioSender
+            ) {
+              await connectionManager.audioSender.startRecording(localStream);
+            }
+
+            log("媒体设备恢复成功", "success");
+            return true;
+          } catch (recoveryError) {
+            log(`媒体设备恢复失败: ${recoveryError.message}`, "error");
+
+            // 显示用户友好的错误信息
+            elements.systemStatus.textContent = "媒体设备错误";
+            elements.audioStatus.textContent = "设备异常";
+            elements.audioStatus.className = "status-value error";
+
+            return false;
+          }
+        }
+
+        static getErrorSuggestion(error) {
+          const errorMessage = error.message.toLowerCase();
+
+          if (
+            errorMessage.includes("permission") ||
+            errorMessage.includes("denied")
+          ) {
+            return "请检查浏览器麦克风权限设置";
+          } else if (
+            errorMessage.includes("network") ||
+            errorMessage.includes("connection")
+          ) {
+            return "请检查网络连接";
+          } else if (
+            errorMessage.includes("webrtc") ||
+            errorMessage.includes("ice")
+          ) {
+            return "WebRTC连接问题，已自动切换到WebSocket模式";
+          } else if (errorMessage.includes("websocket")) {
+            return "WebSocket连接问题，请刷新页面重试";
+          } else if (
+            errorMessage.includes("audio") ||
+            errorMessage.includes("media")
+          ) {
+            return "音频设备问题，请检查麦克风设置";
+          } else {
+            return "未知错误，请刷新页面重试";
+          }
+        }
+      }
+
+      // 连接测试工具
+      class ConnectionTester {
+        static async testWebRTCConnectivity() {
+          log("🔍 开始测试WebRTC连接能力...");
+
+          try {
+            // 测试STUN服务器连接
+            const stunServers = [
+              { urls: "stun:stun.l.google.com:19302" },
+              { urls: "stun:stun1.l.google.com:19302" },
+              { urls: "stun:stun.cloudflare.com:3478" },
+            ];
+
+            const testResults = [];
+
+            for (const stunServer of stunServers) {
+              const startTime = Date.now();
+
+              try {
+                const testPc = new RTCPeerConnection({
+                  iceServers: [stunServer],
+                });
+
+                // 创建数据通道来触发ICE收集
+                testPc.createDataChannel("test");
+
+                const offer = await testPc.createOffer();
+                await testPc.setLocalDescription(offer);
+
+                // 等待ICE候选者收集
+                const icePromise = new Promise((resolve, reject) => {
+                  const timeout = setTimeout(() => {
+                    reject(new Error("ICE收集超时"));
+                  }, 5000);
+
+                  testPc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                      clearTimeout(timeout);
+                      resolve(event.candidate);
+                    }
+                  };
+                });
+
+                const candidate = await icePromise;
+                const duration = Date.now() - startTime;
+
+                testResults.push({
+                  server: stunServer.urls,
+                  success: true,
+                  duration: duration,
+                  candidate: candidate.candidate,
+                });
+
+                testPc.close();
+              } catch (error) {
+                const duration = Date.now() - startTime;
+                testResults.push({
+                  server: stunServer.urls,
+                  success: false,
+                  duration: duration,
+                  error: error.message,
+                });
+              }
+            }
+
+            // 分析测试结果
+            const successCount = testResults.filter((r) => r.success).length;
+            const avgDuration =
+              testResults.reduce((sum, r) => sum + r.duration, 0) /
+              testResults.length;
+
+            const result = {
+              overall: successCount > 0,
+              successRate: successCount / testResults.length,
+              averageDuration: avgDuration,
+              details: testResults,
+            };
+
+            log(
+              `WebRTC连接测试完成: ${successCount}/${
+                testResults.length
+              } 成功, 平均延迟: ${avgDuration.toFixed(0)}ms`
+            );
+
+            return result;
+          } catch (error) {
+            log(`WebRTC连接测试失败: ${error.message}`, "error");
+            return {
+              overall: false,
+              error: error.message,
+            };
+          }
+        }
+
+        static async testWebSocketConnectivity() {
+          log("🔍 开始测试WebSocket连接能力...");
+
+          const startTime = Date.now();
+
+          try {
+            const testWs = new WebSocket(WS_URL);
+
+            const connectPromise = new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                reject(new Error("WebSocket连接超时"));
+              }, 5000);
+
+              testWs.onopen = () => {
+                clearTimeout(timeout);
+                resolve(true);
+              };
+
+              testWs.onerror = (error) => {
+                clearTimeout(timeout);
+                reject(error);
+              };
+            });
+
+            await connectPromise;
+            const duration = Date.now() - startTime;
+
+            // 测试消息发送
+            const pingPromise = new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                reject(new Error("WebSocket ping超时"));
+              }, 3000);
+
+              testWs.onmessage = (event) => {
+                try {
+                  const message = JSON.parse(event.data);
+                  if (message.type === "bind_confirm") {
+                    clearTimeout(timeout);
+                    resolve(true);
+                  }
+                } catch (e) {
+                  // 忽略解析错误
+                }
+              };
+
+              // 发送绑定消息
+              testWs.send(
+                JSON.stringify({
+                  type: "bind",
+                  client_id: "test_client_" + Date.now(),
+                  timestamp: Date.now(),
+                })
+              );
+            });
+
+            await pingPromise;
+            testWs.close();
+
+            const totalDuration = Date.now() - startTime;
+
+            const result = {
+              success: true,
+              connectDuration: duration,
+              totalDuration: totalDuration,
+            };
+
+            log(
+              `WebSocket连接测试成功: 连接耗时 ${duration}ms, 总耗时 ${totalDuration}ms`
+            );
+
+            return result;
+          } catch (error) {
+            const duration = Date.now() - startTime;
+
+            log(`WebSocket连接测试失败: ${error.message}`, "error");
+
+            return {
+              success: false,
+              duration: duration,
+              error: error.message,
+            };
+          }
+        }
+
+        static async measureLatency() {
+          log("🔍 开始测量网络延迟...");
+
+          try {
+            const measurements = [];
+
+            // 进行5次延迟测量
+            for (let i = 0; i < 5; i++) {
+              const startTime = Date.now();
+
+              try {
+                const response = await fetch(`${SERVER_URL}/health`, {
+                  method: "GET",
+                  cache: "no-cache",
+                });
+
+                if (response.ok) {
+                  const endTime = Date.now();
+                  const latency = endTime - startTime;
+                  measurements.push(latency);
+                } else {
+                  log(`延迟测量失败: HTTP ${response.status}`, "warning");
+                }
+              } catch (error) {
+                log(`延迟测量错误: ${error.message}`, "warning");
+              }
+
+              // 间隔500ms
+              if (i < 4) {
+                await new Promise((resolve) => setTimeout(resolve, 500));
+              }
+            }
+
+            if (measurements.length > 0) {
+              const avgLatency =
+                measurements.reduce((sum, lat) => sum + lat, 0) /
+                measurements.length;
+              const minLatency = Math.min(...measurements);
+              const maxLatency = Math.max(...measurements);
+
+              const result = {
+                average: avgLatency,
+                minimum: minLatency,
+                maximum: maxLatency,
+                measurements: measurements,
+              };
+
+              log(
+                `网络延迟测量完成: 平均 ${avgLatency.toFixed(
+                  0
+                )}ms, 范围 ${minLatency}-${maxLatency}ms`
+              );
+
+              // 更新UI显示
+              elements.latency.textContent = `${avgLatency.toFixed(0)} ms`;
+
+              return result;
+            } else {
+              throw new Error("所有延迟测量都失败了");
+            }
+          } catch (error) {
+            log(`延迟测量失败: ${error.message}`, "error");
+            return {
+              error: error.message,
+            };
+          }
+        }
+
+        static async runFullConnectivityTest() {
+          log("🚀 开始完整连接测试...");
+
+          const testResults = {
+            timestamp: Date.now(),
+            userAgent: navigator.userAgent,
+            network: navigator.connection?.effectiveType || "unknown",
+            webrtc: null,
+            websocket: null,
+            latency: null,
+          };
+
+          try {
+            // 测试网络延迟
+            testResults.latency = await this.measureLatency();
+
+            // 测试WebSocket连接
+            testResults.websocket = await this.testWebSocketConnectivity();
+
+            // 测试WebRTC连接
+            testResults.webrtc = await this.testWebRTCConnectivity();
+
+            // 分析结果并给出建议
+            const recommendations = this.analyzeTestResults(testResults);
+
+            log("📊 连接测试完成，结果分析:");
+            recommendations.forEach((rec) => {
+              log(`  • ${rec}`, "info");
+            });
+
+            return {
+              results: testResults,
+              recommendations: recommendations,
+            };
+          } catch (error) {
+            log(`连接测试失败: ${error.message}`, "error");
+            return {
+              error: error.message,
+              results: testResults,
+            };
+          }
+        }
+
+        static analyzeTestResults(results) {
+          const recommendations = [];
+
+          // 分析延迟
+          if (results.latency && results.latency.average) {
+            if (results.latency.average < 100) {
+              recommendations.push("网络延迟良好，适合实时音频通信");
+            } else if (results.latency.average < 300) {
+              recommendations.push("网络延迟中等，音频通信可能有轻微延迟");
+            } else {
+              recommendations.push("网络延迟较高，建议检查网络连接");
+            }
+          }
+
+          // 分析WebSocket
+          if (results.websocket) {
+            if (results.websocket.success) {
+              recommendations.push("WebSocket连接正常，支持降级模式");
+            } else {
+              recommendations.push("WebSocket连接失败，降级模式不可用");
+            }
+          }
+
+          // 分析WebRTC
+          if (results.webrtc) {
+            if (results.webrtc.overall) {
+              if (results.webrtc.successRate >= 0.8) {
+                recommendations.push("WebRTC连接良好，推荐使用WebRTC模式");
+              } else {
+                recommendations.push("WebRTC连接不稳定，建议使用WebSocket模式");
+              }
+            } else {
+              recommendations.push("WebRTC连接失败，将自动使用WebSocket模式");
+            }
+          }
+
+          return recommendations;
+        }
+      }
+
+      // 错误监控和日志模块
+      class ErrorMonitor {
+        constructor() {
+          this.errorCounts = {
+            websocket: 0,
+            webrtc: 0,
+            audio: 0,
+            pcm: 0,
+            mp3: 0,
+            tts: 0,
+          };
+          this.errorHistory = [];
+          this.maxHistorySize = 100;
+        }
+
+        logError(category, error, context = {}) {
+          const errorEntry = {
+            timestamp: Date.now(),
+            category: category,
+            message: error.message || error,
+            context: context,
+            stack: error.stack || null,
+          };
+
+          this.errorHistory.push(errorEntry);
+          if (this.errorHistory.length > this.maxHistorySize) {
+            this.errorHistory.shift();
+          }
+
+          this.errorCounts[category] = (this.errorCounts[category] || 0) + 1;
+
+          // 详细错误日志
+          log(`❌ [${category.toUpperCase()}] ${errorEntry.message}`, "error");
+
+          // 如果有上下文信息，也记录
+          if (Object.keys(context).length > 0) {
+            log(`📋 错误上下文: ${JSON.stringify(context)}`, "info");
+          }
+
+          // 检查是否需要降级
+          this.checkForDegradation(category);
+        }
+
+        checkForDegradation(category) {
+          const threshold = 5; // 错误阈值
+          const timeWindow = 60000; // 1分钟时间窗口
+
+          const recentErrors = this.errorHistory.filter(
+            (entry) =>
+              entry.category === category &&
+              Date.now() - entry.timestamp < timeWindow
+          );
+
+          if (recentErrors.length >= threshold) {
+            log(`⚠️ ${category}错误频繁，建议降级处理`, "warning");
+
+            // 根据错误类型执行降级策略
+            switch (category) {
+              case "websocket":
+                log("🔄 WebSocket错误过多，建议切换到WebRTC模式", "warning");
+                break;
+              case "pcm":
+                log("🔇 PCM处理错误过多，可能影响音频质量", "warning");
+                break;
+              case "mp3":
+                log("🎵 MP3播放错误过多，可能降级到文本模式", "warning");
+                break;
+            }
+          }
+        }
+
+        getErrorSummary() {
+          return {
+            counts: this.errorCounts,
+            recentErrors: this.errorHistory.slice(-10),
+            totalErrors: this.errorHistory.length,
+          };
+        }
+
+        clearHistory() {
+          this.errorHistory = [];
+          this.errorCounts = {
+            websocket: 0,
+            webrtc: 0,
+            audio: 0,
+            pcm: 0,
+            mp3: 0,
+            tts: 0,
+          };
+          log("🧹 错误历史已清空", "info");
+        }
+      }
+
+      // 全局错误监控实例
+      const errorMonitor = new ErrorMonitor();
+
+      // 全局连接管理器实例
+      let connectionManager = new ConnectionManager();
+
       // 事件监听器
-      elements.connectBtn.addEventListener("click", connectToServer);
-      elements.disconnectBtn.addEventListener("click", disconnectFromServer);
+      elements.connectBtn.addEventListener("click", () =>
+        connectionManager.connect()
+      );
+      elements.disconnectBtn.addEventListener("click", () =>
+        connectionManager.disconnect()
+      );
 
       // 日志函数
       function log(message, type = "info") {
@@ -447,6 +1993,64 @@
         elements.logOutput.appendChild(logEntry);
         elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
         console.log(`[${type.toUpperCase()}] ${message}`);
+      }
+
+      // WebSocket自动重连调度
+      function scheduleWebSocketReconnect() {
+        if (websocketReconnecting) return;
+
+        websocketReconnecting = true;
+        reconnectAttempts++;
+
+        if (reconnectAttempts > maxReconnectAttempts) {
+          log(
+            `❌ WebSocket重连失败，已达到最大重试次数 (${maxReconnectAttempts})`,
+            "error"
+          );
+          websocketReconnecting = false;
+          reconnectAttempts = 0;
+
+          // 显示重连失败提示
+          elements.connectionStatus.textContent = "WebSocket重连失败";
+          elements.systemStatus.textContent = "连接异常";
+          return;
+        }
+
+        const delay = Math.min(
+          reconnectDelay * Math.pow(2, reconnectAttempts - 1),
+          30000
+        ); // 最大30秒
+        log(
+          `🔄 WebSocket将在 ${
+            delay / 1000
+          } 秒后重连 (第${reconnectAttempts}次尝试)`,
+          "warning"
+        );
+
+        setTimeout(async () => {
+          try {
+            log(
+              `🔄 开始WebSocket重连尝试 ${reconnectAttempts}/${maxReconnectAttempts}...`
+            );
+            await initWebSocket();
+
+            // 重连成功，重置计数器
+            reconnectAttempts = 0;
+            websocketReconnecting = false;
+            log("✅ WebSocket重连成功", "success");
+
+            // 如果是WebSocket音频模式，重新初始化音频处理
+            if (connectionManager.mode === "websocket") {
+              await connectionManager.switchToWebSocketMode();
+            }
+          } catch (error) {
+            log(`❌ WebSocket重连失败: ${error.message}`, "error");
+            websocketReconnecting = false;
+
+            // 继续下一次重连尝试
+            scheduleWebSocketReconnect();
+          }
+        }, delay);
       }
 
       // 初始化WebSocket连接
@@ -477,13 +2081,37 @@
             }
           };
 
-          websocket.onclose = () => {
-            log("WebSocket连接已关闭");
+          websocket.onclose = (event) => {
+            log(
+              `WebSocket连接已关闭 (代码: ${event.code}, 原因: ${event.reason})`
+            );
             elements.connectionStatus.textContent = "WebSocket已断开";
+
+            // 自动重连机制
+            if (
+              !websocketReconnecting &&
+              connectionManager.mode === "websocket"
+            ) {
+              scheduleWebSocketReconnect();
+            }
           };
 
           websocket.onerror = (error) => {
-            log("WebSocket错误: " + error.message, "error");
+            // 使用错误监控系统
+            errorMonitor.logError("websocket", error, {
+              url: WS_URL,
+              readyState: websocket ? websocket.readyState : "unknown",
+              mode: connectionManager.mode,
+            });
+            stats.errors++;
+
+            // 自动重连机制
+            if (
+              !websocketReconnecting &&
+              connectionManager.mode === "websocket"
+            ) {
+              scheduleWebSocketReconnect();
+            }
           };
         } catch (error) {
           log("WebSocket初始化失败: " + error.message, "error");
@@ -502,7 +2130,35 @@
           case "interrupt_signal":
             log("收到打断信号", "warning");
             break;
-          // 注意：AI音频回复现在通过WebRTC轨道传输，不再需要WebSocket处理
+          case "audio_response":
+            // 处理WebSocket音频回复
+            if (connectionManager.audioReceiver) {
+              const metadata = {
+                text: message.text,
+                timestamp: message.timestamp,
+                sequence: message.sequence,
+                has_audio: message.has_audio || false,
+              };
+
+              // 只有当有音频数据时才传递data字段
+              const audioData = message.has_audio ? message.data : null;
+
+              connectionManager.audioReceiver.handleIncomingAudio(
+                audioData,
+                metadata
+              );
+            } else if (message.text) {
+              // 如果没有音频接收器但有文本，直接显示文本
+              log(`🔊 AI回复: ${message.text}`, "success");
+            }
+            break;
+          case "audio_control":
+            // 处理音频控制指令（打断机制）
+            if (connectionManager.audioReceiver) {
+              connectionManager.audioReceiver.handleAudioControl(message);
+            }
+            break;
+          // 注意：AI音频回复现在支持WebRTC轨道传输和WebSocket传输两种模式
         }
       }
 
@@ -663,7 +2319,8 @@
       // 初始化音频可视化
       function initAudioVisualization() {
         try {
-          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          audioContext = new (window.AudioContext ||
+            window.webkitAudioContext)();
           analyser = audioContext.createAnalyser();
           analyser.fftSize = 256;
 
@@ -733,6 +2390,26 @@
         }
         setTimeout(updateStats, 1000);
       }
+
+      // 全局错误处理器
+      window.addEventListener("error", (event) => {
+        log(`全局错误: ${event.error?.message || event.message}`, "error");
+        stats.errors++;
+
+        // 根据错误类型尝试恢复
+        if (event.error) {
+          const suggestion = ErrorRecovery.getErrorSuggestion(event.error);
+          log(`错误建议: ${suggestion}`, "info");
+        }
+      });
+
+      window.addEventListener("unhandledrejection", (event) => {
+        log(`未处理的Promise拒绝: ${event.reason}`, "error");
+        stats.errors++;
+
+        // 阻止默认的控制台错误输出
+        event.preventDefault();
+      });
 
       // 初始化
       document.addEventListener("DOMContentLoaded", () => {
