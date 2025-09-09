@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>🤖 WebRTC反诈AI双工对话客户端</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        color: #333;
+      }
+
+      .container {
+        background: rgba(255, 255, 255, 0.95);
+        border-radius: 20px;
+        padding: 30px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+        max-width: 800px;
+        width: 90%;
+        backdrop-filter: blur(10px);
+      }
+
+      .header {
+        text-align: center;
+        margin-bottom: 30px;
+      }
+
+      .header h1 {
+        color: #4a5568;
+        margin-bottom: 10px;
+        font-size: 2.2em;
+      }
+
+      .header p {
+        color: #718096;
+        font-size: 1.1em;
+      }
+
+      .status-card {
+        background: linear-gradient(135deg, #f7fafc 0%, #edf2f7 100%);
+        border-radius: 15px;
+        padding: 20px;
+        margin-bottom: 25px;
+        border: 1px solid #e2e8f0;
+      }
+
+      .connection-info {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+        margin-bottom: 20px;
+        font-size: 0.9em;
+      }
+
+      .connection-info div {
+        padding: 10px;
+        background: rgba(255, 255, 255, 0.7);
+        border-radius: 8px;
+        border: 1px solid #e2e8f0;
+      }
+
+      .connection-info strong {
+        color: #2d3748;
+        display: block;
+        margin-bottom: 5px;
+      }
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 15px;
+        margin-bottom: 20px;
+      }
+
+      .status-item {
+        text-align: center;
+        padding: 15px;
+        background: rgba(255, 255, 255, 0.8);
+        border-radius: 10px;
+        border: 1px solid #e2e8f0;
+      }
+
+      .status-label {
+        font-size: 0.85em;
+        color: #718096;
+        margin-bottom: 5px;
+        font-weight: 500;
+      }
+
+      .status-value {
+        font-size: 1.1em;
+        font-weight: bold;
+        color: #2d3748;
+      }
+
+      .status-value.success {
+        color: #38a169;
+      }
+
+      .status-value.warning {
+        color: #d69e2e;
+      }
+
+      .status-value.error {
+        color: #e53e3e;
+      }
+
+      .controls {
+        display: flex;
+        justify-content: center;
+        gap: 15px;
+        margin-bottom: 25px;
+        flex-wrap: wrap;
+      }
+
+      .btn {
+        padding: 12px 24px;
+        border: none;
+        border-radius: 25px;
+        font-size: 1em;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        min-width: 120px;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .btn:before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(255, 255, 255, 0.2),
+          transparent
+        );
+        transition: left 0.5s;
+      }
+
+      .btn:hover:before {
+        left: 100%;
+      }
+
+      .btn-primary {
+        background: linear-gradient(135deg, #4299e1 0%, #3182ce 100%);
+        color: white;
+        box-shadow: 0 4px 15px rgba(66, 153, 225, 0.3);
+      }
+
+      .btn-primary:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(66, 153, 225, 0.4);
+      }
+
+      .btn-secondary {
+        background: linear-gradient(135deg, #ed8936 0%, #dd6b20 100%);
+        color: white;
+        box-shadow: 0 4px 15px rgba(237, 137, 54, 0.3);
+      }
+
+      .btn-secondary:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(237, 137, 54, 0.4);
+      }
+
+      .btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+        transform: none !important;
+      }
+
+      .audio-visualizer {
+        background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%);
+        border-radius: 15px;
+        padding: 20px;
+        margin-bottom: 25px;
+        text-align: center;
+      }
+
+      .audio-visualizer h3 {
+        color: #e2e8f0;
+        margin-bottom: 15px;
+        font-size: 1.1em;
+      }
+
+      #audioCanvas {
+        width: 100%;
+        height: 120px;
+        border-radius: 10px;
+        background: #000;
+        margin-bottom: 10px;
+      }
+
+      .audio-level {
+        color: #4299e1;
+        font-size: 1.2em;
+        font-weight: bold;
+      }
+
+      .log-container {
+        background: #1a202c;
+        border-radius: 15px;
+        padding: 20px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+
+      .log-container h3 {
+        color: #e2e8f0;
+        margin-bottom: 15px;
+        font-size: 1.1em;
+      }
+
+      .log-entry {
+        margin-bottom: 8px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-family: "Consolas", "Monaco", monospace;
+        font-size: 0.85em;
+        line-height: 1.4;
+      }
+
+      .log-entry.info {
+        background: rgba(66, 153, 225, 0.1);
+        color: #90cdf4;
+        border-left: 3px solid #4299e1;
+      }
+
+      .log-entry.success {
+        background: rgba(56, 161, 105, 0.1);
+        color: #9ae6b4;
+        border-left: 3px solid #38a169;
+      }
+
+      .log-entry.warning {
+        background: rgba(214, 158, 46, 0.1);
+        color: #faf089;
+        border-left: 3px solid #d69e2e;
+      }
+
+      .log-entry.error {
+        background: rgba(229, 62, 62, 0.1);
+        color: #feb2b2;
+        border-left: 3px solid #e53e3e;
+      }
+
+      .timestamp {
+        opacity: 0.7;
+        font-size: 0.8em;
+      }
+
+      /* 响应式设计 */
+      @media (max-width: 768px) {
+        .container {
+          padding: 20px;
+          margin: 10px;
+        }
+
+        .connection-info {
+          grid-template-columns: 1fr;
+        }
+
+        .status-grid {
+          grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        }
+
+        .controls {
+          flex-direction: column;
+          align-items: center;
+        }
+
+        .btn {
+          width: 100%;
+          max-width: 250px;
+        }
+      }
+
+      /* 动画效果 */
+      @keyframes pulse {
+        0% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.05);
+        }
+        100% {
+          transform: scale(1);
+        }
+      }
+
+      .recording {
+        animation: pulse 1.5s infinite;
+      }
+
+      /* 滚动条样式 */
+      .log-container::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .log-container::-webkit-scrollbar-track {
+        background: #2d3748;
+        border-radius: 3px;
+      }
+
+      .log-container::-webkit-scrollbar-thumb {
+        background: #4a5568;
+        border-radius: 3px;
+      }
+
+      .log-container::-webkit-scrollbar-thumb:hover {
+        background: #718096;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h1>🤖 反诈AI双工对话系统</h1>
+        <p>基于WebRTC的实时语音交互平台</p>
+      </div>
+
+      <div class="status-card">
+        <div class="connection-info">
+          <div>
+            <strong>WebRTC服务:</strong>
+            <span id="webrtcAddress">http://81.71.152.21:8080</span>
+          </div>
+          <div>
+            <strong>WebSocket:</strong>
+            <span id="wsAddress">ws://81.71.152.21:31004</span>
+          </div>
+          <div>
+            <strong>连接状态:</strong> <span id="connectionStatus">未连接</span>
+          </div>
+          <div>
+            <strong>系统状态:</strong> <span id="systemStatus">待机中</span>
+          </div>
+        </div>
+
+        <div class="status-grid">
+          <div class="status-item">
+            <div class="status-label">WebRTC状态</div>
+            <div class="status-value" id="webrtcStatus">未连接</div>
+          </div>
+          <div class="status-item">
+            <div class="status-label">音频状态</div>
+            <div class="status-value" id="audioStatus">未激活</div>
+          </div>
+          <div class="status-item">
+            <div class="status-label">AI状态</div>
+            <div class="status-value" id="aiStatus">待机</div>
+          </div>
+          <div class="status-item">
+            <div class="status-label">延迟</div>
+            <div class="status-value" id="latency">-- ms</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="btn btn-primary" id="connectBtn">🔗 连接服务器</button>
+        <button class="btn btn-secondary" id="disconnectBtn" disabled>
+          🔌 断开连接
+        </button>
+      </div>
+
+      <div class="audio-visualizer">
+        <h3>🎵 音频可视化</h3>
+        <canvas id="audioCanvas"></canvas>
+        <div class="audio-level">
+          音频电平: <span id="audioLevel">0%</span>
+        </div>
+      </div>
+
+      <div class="log-container">
+        <h3>📋 系统日志</h3>
+        <div id="logOutput"></div>
+      </div>
+    </div>
+
+    <script>
+      // 全局变量
+      let pc = null;
+      let localStream = null;
+      let remoteStream = null;
+      let websocket = null;
+      let audioContext = null;
+      let analyser = null;
+      let dataArray = null;
+      let animationId = null;
+
+      // 服务器配置
+      const SERVER_URL = "http://81.71.152.21:8080";
+      const WS_URL = "ws://81.71.152.21:31004";
+
+      // DOM元素
+      const elements = {
+        connectBtn: document.getElementById("connectBtn"),
+        disconnectBtn: document.getElementById("disconnectBtn"),
+        webrtcStatus: document.getElementById("webrtcStatus"),
+        audioStatus: document.getElementById("audioStatus"),
+        aiStatus: document.getElementById("aiStatus"),
+        latency: document.getElementById("latency"),
+        connectionStatus: document.getElementById("connectionStatus"),
+        systemStatus: document.getElementById("systemStatus"),
+        logOutput: document.getElementById("logOutput"),
+        audioCanvas: document.getElementById("audioCanvas"),
+        audioLevel: document.getElementById("audioLevel"),
+      };
+
+      // 统计数据
+      const stats = {
+        startTime: null,
+        messagesReceived: 0,
+        messagesSent: 0,
+        errors: 0,
+      };
+
+      // 事件监听器
+      elements.connectBtn.addEventListener("click", connectToServer);
+      elements.disconnectBtn.addEventListener("click", disconnectFromServer);
+
+      // 日志函数
+      function log(message, type = "info") {
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = document.createElement("div");
+        logEntry.className = `log-entry ${type}`;
+        logEntry.innerHTML = `
+          <span class="timestamp">[${timestamp}]</span> ${message}
+        `;
+        elements.logOutput.appendChild(logEntry);
+        elements.logOutput.scrollTop = elements.logOutput.scrollHeight;
+        console.log(`[${type.toUpperCase()}] ${message}`);
+      }
+
+      // 初始化WebSocket连接
+      async function initWebSocket() {
+        try {
+          websocket = new WebSocket(WS_URL);
+
+          websocket.onopen = () => {
+            log("WebSocket连接已建立");
+            elements.connectionStatus.textContent = "WebSocket已连接";
+
+            // 发送绑定消息
+            const bindMsg = {
+              type: "bind",
+              client_id: "web_client_" + Date.now(),
+              timestamp: Date.now(),
+            };
+            websocket.send(JSON.stringify(bindMsg));
+            log("已发送WebSocket绑定消息");
+          };
+
+          websocket.onmessage = (event) => {
+            try {
+              const message = JSON.parse(event.data);
+              handleWebSocketMessage(message);
+            } catch (e) {
+              log("WebSocket消息解析失败: " + e.message, "error");
+            }
+          };
+
+          websocket.onclose = () => {
+            log("WebSocket连接已关闭");
+            elements.connectionStatus.textContent = "WebSocket已断开";
+          };
+
+          websocket.onerror = (error) => {
+            log("WebSocket错误: " + error.message, "error");
+          };
+        } catch (error) {
+          log("WebSocket初始化失败: " + error.message, "error");
+        }
+      }
+
+      // 处理WebSocket消息
+      function handleWebSocketMessage(message) {
+        log("收到WebSocket消息: " + message.type);
+        stats.messagesReceived++;
+
+        switch (message.type) {
+          case "bind_confirm":
+            log("WebSocket绑定确认", "success");
+            break;
+          case "interrupt_signal":
+            log("收到打断信号", "warning");
+            break;
+          // 注意：AI音频回复现在通过WebRTC轨道传输，不再需要WebSocket处理
+        }
+      }
+
+      // 连接到服务器
+      async function connectToServer() {
+        try {
+          log("开始连接到服务器...");
+          elements.connectBtn.disabled = true;
+          elements.systemStatus.textContent = "连接中...";
+
+          // 检查浏览器兼容性
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error("浏览器不支持WebRTC");
+          }
+
+          // 初始化WebSocket
+          await initWebSocket();
+
+          // 获取用户媒体
+          log("请求麦克风权限...");
+          localStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              sampleRate: 16000,
+            },
+            video: false,
+          });
+
+          log("✅ 麦克风权限获取成功");
+          elements.audioStatus.textContent = "已激活";
+          elements.audioStatus.className = "status-value success";
+
+          // 初始化音频可视化
+          initAudioVisualization();
+
+          // 创建PeerConnection
+          log("🔗 创建PeerConnection...");
+          pc = new RTCPeerConnection({
+            iceServers: [
+              { urls: "stun:stun.l.google.com:19302" },
+              { urls: "stun:stun1.l.google.com:19302" },
+            ],
+          });
+
+          // 添加本地流
+          localStream.getTracks().forEach((track) => {
+            pc.addTrack(track, localStream);
+          });
+
+          // 处理远程流
+          pc.ontrack = (event) => {
+            log("🔊 收到远程音频流");
+            remoteStream = event.streams[0];
+            const audio = new Audio();
+            audio.srcObject = remoteStream;
+            audio.autoplay = true;
+            log("✅ 远程音频开始播放");
+          };
+
+          // ICE连接状态变化
+          pc.oniceconnectionstatechange = () => {
+            elements.webrtcStatus.textContent = pc.iceConnectionState;
+            log(`🔗 WebRTC状态: ${pc.iceConnectionState}`);
+            if (pc.iceConnectionState === "connected") {
+              elements.webrtcStatus.className = "status-value success";
+              elements.systemStatus.textContent = "已连接";
+              elements.disconnectBtn.disabled = false;
+              log("🎉 WebRTC连接建立成功！", "success");
+              stats.startTime = Date.now();
+            } else if (pc.iceConnectionState === "failed") {
+              elements.webrtcStatus.className = "status-value error";
+              log("❌ WebRTC连接失败", "error");
+              stats.errors++;
+            }
+          };
+
+          // 创建offer
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+
+          // 发送offer到服务器
+          const response = await fetch(`${SERVER_URL}/offer`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              sdp: offer.sdp,
+              type: offer.type,
+            }),
+          });
+
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const answer = await response.json();
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
+          elements.connectionStatus.textContent = "WebRTC已连接";
+          log("✅ 服务器连接成功！", "success");
+        } catch (error) {
+          log(`❌ 连接失败: ${error.message}`, "error");
+          elements.connectBtn.disabled = false;
+          elements.systemStatus.textContent = "连接失败";
+          stats.errors++;
+        }
+      }
+
+      // 断开连接
+      async function disconnectFromServer() {
+        try {
+          log("正在断开连接...");
+
+          // 停止音频可视化
+          if (animationId) {
+            cancelAnimationFrame(animationId);
+            animationId = null;
+          }
+
+          // 停止本地流
+          if (localStream) {
+            localStream.getTracks().forEach((track) => track.stop());
+            localStream = null;
+          }
+
+          // 关闭PeerConnection
+          if (pc) {
+            pc.close();
+            pc = null;
+          }
+
+          // 关闭WebSocket
+          if (websocket) {
+            websocket.close();
+            websocket = null;
+          }
+
+          // 重置UI状态
+          elements.connectBtn.disabled = false;
+          elements.disconnectBtn.disabled = true;
+          elements.webrtcStatus.textContent = "未连接";
+          elements.webrtcStatus.className = "status-value";
+          elements.audioStatus.textContent = "未激活";
+          elements.audioStatus.className = "status-value";
+          elements.connectionStatus.textContent = "WebSocket已连接";
+          elements.systemStatus.textContent = "已断开";
+          elements.latency.textContent = "-- ms";
+
+          log("✅ 已断开连接", "success");
+        } catch (error) {
+          log(`❌ 断开连接时出错: ${error.message}`, "error");
+        }
+      }
+
+      // 初始化音频可视化
+      function initAudioVisualization() {
+        try {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 256;
+
+          const source = audioContext.createMediaStreamSource(localStream);
+          source.connect(analyser);
+
+          const bufferLength = analyser.frequencyBinCount;
+          dataArray = new Uint8Array(bufferLength);
+
+          drawAudioVisualization();
+          log("🎵 音频可视化已启动");
+        } catch (error) {
+          log(`音频可视化初始化失败: ${error.message}`, "warning");
+        }
+      }
+
+      // 绘制音频可视化
+      function drawAudioVisualization() {
+        if (!analyser || !dataArray) return;
+
+        animationId = requestAnimationFrame(drawAudioVisualization);
+
+        analyser.getByteFrequencyData(dataArray);
+
+        const canvas = elements.audioCanvas;
+        const canvasCtx = canvas.getContext("2d");
+        const WIDTH = canvas.width;
+        const HEIGHT = canvas.height;
+
+        canvasCtx.clearRect(0, 0, WIDTH, HEIGHT);
+
+        const barWidth = (WIDTH / dataArray.length) * 2.5;
+        let barHeight;
+        let x = 0;
+
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+        elements.audioLevel.textContent = Math.round(average) + "%";
+
+        for (let i = 0; i < dataArray.length; i++) {
+          barHeight = (dataArray[i] / 255) * canvas.height;
+
+          const gradient = canvasCtx.createLinearGradient(
+            0,
+            canvas.height - barHeight,
+            0,
+            canvas.height
+          );
+          gradient.addColorStop(0, "#4299e1");
+          gradient.addColorStop(1, "#3182ce");
+
+          canvasCtx.fillStyle = gradient;
+          canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+
+          x += barWidth + 1;
+        }
+      }
+
+      // 更新统计信息
+      function updateStats() {
+        if (stats.startTime) {
+          const uptime = Date.now() - stats.startTime;
+          // 这里可以添加更多统计信息的更新
+        }
+        setTimeout(updateStats, 1000);
+      }
+
+      // 初始化
+      document.addEventListener("DOMContentLoaded", () => {
+        log("页面加载完成，初始化WebSocket连接");
+        initWebSocket();
+        updateStats();
+      });
+    </script>
+  </body>
+</html>
